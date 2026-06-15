@@ -141,23 +141,29 @@ Java.perform(function () {
     var classmethod = "{classMethod}";
     var methodsignature = "{methodSignature}";
     var hookclass = Java.use(classname);
+    var inputNames = "{args}";
+    var targetMethod = hookclass.{classMethod}.{overload}
     
-    hookclass.{classMethod}.{overload}implementation = function ({args}) {
+    targetMethod.implementation = function ({args}) {
         send("[Call_Stack]\\nClass: " +classname+"\\nMethod: "+methodsignature+"\\n");
-        var ret = this.{classMethod}({args});
+        var ret = targetMethod.call(this, {args});
 
         var s="";
         s=s+"[Hook_Stack]\\n"
         s=s+"Class: "+classname+"\\n"
         s=s+"Method: "+methodsignature+"\\n"
         s=s+"Called by: "+Java.use('java.lang.Exception').$new().getStackTrace().toString().split(',')[1]+"\\n"
-        s=s+"Input: "+eval(args)+"\\n"
+        var inputValues = [{args}];
+        for (var i = 0; i < inputValues.length; i++) {
+            s=s+"Input v"+i+": "+inputValues[i]+"\\n";
+        }
         s=s+"Output: "+ret+"\\n"
         {{stacktrace}}
         send(s);
                 
         return ret;
     };
+    send("[RMS_HOOK] Hook installed\\nClass: "+classname+"\\nMethod: "+methodsignature+"\\nArgs: "+inputNames+"\\n");
 });
 `
 
@@ -206,18 +212,23 @@ Java.perform(function () {
     var classmethod = "{classMethod}";
     var methodsignature = "{methodSignature}";
     var hookclass = Java.use(classname);
+    var inputNames = "{args}";
+    var targetMethod = hookclass.{classMethod}.{overload}
     
     //{methodSignature}
-    hookclass.{classMethod}.{overload}implementation = function ({args}) {
+    targetMethod.implementation = function ({args}) {
         send("[Call_Stack]\\nClass: " +classname+"\\nMethod: "+methodsignature+"\\n");
-        var ret = this.{classMethod}({args});
+        var ret = targetMethod.call(this, {args});
         
         var s="";
         s=s+"[Hook_Stack]\\n"
         s=s+"Class: " +classname+"\\n"
         s=s+"Method: " +methodsignature+"\\n"
         s=s+"Called by: "+Java.use('java.lang.Exception').$new().getStackTrace().toString().split(',')[1]+"\\n"
-        s=s+"Input: "+eval({args})+"\\n";
+        var inputValues = [{args}];
+        for (var i = 0; i < inputValues.length; i++) {
+            s=s+"Input v"+i+": "+inputValues[i]+"\\n";
+        }
         s=s+"Output: "+ret+"\\n";
         //uncomment the line below to print StackTrace
         //s=s+"StackTrace: "+Java.use('android.util.Log').getStackTraceString(Java.use('java.lang.Exception').$new()).replace('java.lang.Exception','') +"\\n";
@@ -226,6 +237,7 @@ Java.perform(function () {
                 
         return ret;
     };
+    send("[RMS_HOOK] Hook installed\\nClass: "+classname+"\\nMethod: "+methodsignature+"\\nArgs: "+inputNames+"\\n");
 });
 `
 
@@ -513,6 +525,7 @@ app.post("/", async function(req, res){
     console.log("APIs Monitors: \n" + api_selected)
   else
     console.log("APIs Monitors: None")
+  console.log("[RMS debug] Config device_type: " + config.device_type + " args: " + JSON.stringify(config.device_args))
   
   var device=null
   //get device
@@ -534,6 +547,7 @@ app.post("/", async function(req, res){
         device = await frida.getUsbDevice()
         break;
     }
+    console.log("[RMS debug] Selected device: name=" + device.name + " id=" + device.id + " type=" + device.type)
   }
   catch(err)
   {
@@ -574,6 +588,7 @@ app.post("/", async function(req, res){
       pid= await device.spawn([target_package])
       session = await device.attach(pid)
       console.log('[*] Process Spawned')
+      console.log("[RMS debug] Spawn target=" + target_package + " pid=" + pid)
     }
     if (mode == "Attach" || target_package=="Gadget")
     {
@@ -587,6 +602,7 @@ app.post("/", async function(req, res){
           if(p.identifier==target_package) {
             target_package = p.name;
             target_pid = p.pid;
+            console.log("[RMS debug] Attach candidate identifier=" + p.identifier + " name=" + p.name + " pid=" + p.pid)
             if (target_package == 0) {
               console.log("The application does not seem to be running... Please launch before attaching to it!");
             }
@@ -595,6 +611,7 @@ app.post("/", async function(req, res){
       }        
       session = await device.attach(target_pid)
       console.log('[*] Process Attached')
+      console.log("[RMS debug] Attach pid=" + target_pid + " resolved_name=" + target_package)
     }
 
     const frida_agent = await	fs.readFileSync(FRIDA_AGENT_PATH, 'utf8');
@@ -608,16 +625,24 @@ app.post("/", async function(req, res){
     script.message.connect(onMessage);
 
     await script.load()
+    console.log("[RMS debug] RMS agent loaded into target session")
 
     //API export
     api = script.exports
 
-    if (mode == "Spawn" && target_package!="Gadget")
-      device.resume(pid)
-    
     //loading FRIDA startup script if selected by the user
     if (frida_script)
+    {
+      console.log("[RMS debug] Loading startup script before resume. length=" + frida_script.length)
       await api.loadcustomfridascript(frida_script)
+      console.log("[RMS debug] Startup script loadcustomfridascript() returned")
+    }
+
+    if (mode == "Spawn" && target_package!="Gadget")
+    {
+      device.resume(pid)
+      console.log("[RMS debug] Resumed pid=" + pid)
+    }
 
     //loading APIs Monitors if selected by the user
     if(api_selected)
@@ -731,11 +756,31 @@ app.get("/dump", async function(req, res){
 
     if (filter)
     {
+      const should_probe_crypto = filter.toLowerCase().includes("com.bplus.vtpay.ws") || filter.toLowerCase().includes("crypto")
+      if (should_probe_crypto)
+      {
+        try {
+          const crypto_debug = await api.debugcryptoclass()
+          console.log("[RMS debug] Crypto probe before filter: " + JSON.stringify(crypto_debug, null, 2))
+        } catch (err) {
+          console.log("[RMS debug] Crypto probe before filter failed: " + err)
+        }
+      }
       hooked_classes = await api.loadclasseswithfilter(filter, 
                                                  regex, 
                                                  case_sensitive, 
                                                  whole_world)
       loaded_classes = hooked_classes
+      console.log("[RMS debug] loadclasseswithfilter filter=" + filter + " regex=" + regex + " case=" + case_sensitive + " whole=" + whole_world + " count=" + loaded_classes.length)
+      if (should_probe_crypto)
+      {
+        try {
+          const crypto_debug = await api.debugcryptoclass()
+          console.log("[RMS debug] Crypto probe after filter: " + JSON.stringify(crypto_debug, null, 2))
+        } catch (err) {
+          console.log("[RMS debug] Crypto probe after filter failed: " + err)
+        }
+      }
     }
     else
     {
@@ -1477,6 +1522,12 @@ function onMessage(message, data) {
     console.log('[*] onMessage() message:', message, 'data:', data);
   }
   */
+
+  if (message.type == 'error'){
+    const error_text = "[Frida Error]\n" + (message.stack || message.description || JSON.stringify(message))
+    console.log(error_text)
+    log_handler("global_stack", error_text)
+  }
 
   if (message.type == 'send'){
     if(message.payload.includes("[Call_Stack]"))

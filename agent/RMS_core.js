@@ -10,10 +10,14 @@
  8. apimonitor([api_to_monitor])
  9. getappenvinfo()
  10. listfilesatpath(path)
+ 11. debugcryptoclass()
  ******************************************************************************/
 
 import Java from "frida-java-bridge";
 import ObjC from "frida-objc-bridge";
+
+globalThis.Java = Java;
+globalThis.ObjC = ObjC;
 
 rpc.exports = {
   checkmobileos: function(){
@@ -32,6 +36,12 @@ rpc.exports = {
       return load_classes_with_filter_Android(filter, isRegex, isCase, isWhole)
     else 
       return load_classes_with_filter_iOS(filter, isRegex, isCase, isWhole)
+  },
+  debugcryptoclass: function () {
+    if (Java.available)
+      return debug_crypto_class_Android()
+    else
+      return { error: "Android Java runtime is not available" }
   },
   loadmethods: function (loaded_classes) {
       if (Java.available)
@@ -161,6 +171,66 @@ function load_classes_with_filter_Android(filter, isRegex, isCase, isWhole)
   return loaded_classes;
 }
 
+function debug_crypto_class_Android()
+{
+  var result = {
+    process_id: Process.id,
+    process_name: "N/A",
+    frida_version: Frida.version,
+    java_available: Java.available,
+    active_loader: "N/A",
+    target_class: "com.bplus.vtpay.ws.Crypto",
+    java_use_ok: false,
+    java_use_error: "",
+    enumerate_found: false,
+    ws_classes: []
+  };
+
+  Java.perform(function () {
+    try {
+      var ActivityThread = Java.use("android.app.ActivityThread");
+      var app = ActivityThread.currentApplication();
+      if (app) {
+        result.process_name = app.getApplicationContext().getPackageName().toString();
+        result.active_loader = app.getClassLoader().toString();
+      }
+    } catch (err) {
+      result.process_name = "ActivityThread lookup failed: " + err;
+    }
+
+    try {
+      var Crypto = Java.use(result.target_class);
+      result.java_use_ok = true;
+      result.crypto_class = Crypto.class.toString();
+      try {
+        result.crypto_loader = Crypto.class.getClassLoader().toString();
+      } catch (loaderErr) {
+        result.crypto_loader = "loader lookup failed: " + loaderErr;
+      }
+    } catch (err) {
+      result.java_use_error = err.toString();
+    }
+
+    Java.enumerateLoadedClasses({
+      onMatch: function (className) {
+        if (className === result.target_class)
+          result.enumerate_found = true;
+        if (className.indexOf("com.bplus.vtpay.ws") === 0)
+          result.ws_classes.push(className);
+      },
+      onComplete: function () {}
+    });
+  });
+
+  result.ws_classes.sort();
+  return result;
+}
+
+function replace_all_placeholders(template, placeholder, value)
+{
+  return template.split(placeholder).join(value);
+}
+
 function load_methods_Android(loaded_classes){
   var loaded_methods = {};
   Java.perform(function () {
@@ -252,7 +322,9 @@ function load_frida_custom_script_Android(frida_script)
 {
   Java.perform(function () {
     console.log("FRIDA script LOADED")
+    send("[RMS] FRIDA custom script loading")
     eval(frida_script)
+    send("[RMS] FRIDA custom script loaded")
   })
 }
 
@@ -266,19 +338,14 @@ function hook_classes_and_methods_Android(loaded_classes, loaded_methods, templa
       loaded_methods[clazz].forEach(function (dict) {
         var t = template //template1
 
-        // replace className
-        t = t.replace("{className}", clazz);
-        // replace classMethod x3
-        t = t.replace("{classMethod}", dict["name"]);
-        t = t.replace("{classMethod}", dict["name"]);
-        t = t.replace("{classMethod}", dict["name"]);
-        // replace methodSignature 
-        t = t.replace("{methodSignature}", dict["ui_name"]);
+        t = replace_all_placeholders(t, "{className}", clazz);
+        t = replace_all_placeholders(t, "{classMethod}", dict["name"]);
+        t = replace_all_placeholders(t, "{methodSignature}", dict["ui_name"]);
 
         //check if the method has args 
         if (dict["args"] != "\"\"") {
           //check if the method has overloads
-          t = t.replace("{overload}", "overload(" + dict["args"] + ").");
+          t = replace_all_placeholders(t, "{overload}", "overload(" + dict["args"] + ").");
           // Check args length
           var args_len = (dict["args"].split(",")).length
 
@@ -289,17 +356,13 @@ function hook_classes_and_methods_Android(loaded_classes, loaded_methods, templa
             else args = args + "v" + i + ",";
           }
 
-          //replace args x2
-          t = t.replace("{args}", args);
-          t = t.replace("{args}", args);
+          t = replace_all_placeholders(t, "{args}", args);
 
         } else {
           //Current methods has NO args 
           // no need to overload
-          t = t.replace("{overload}", "overload().");
-          //replace args x2 
-          t = t.replace("{args}", "");
-          t = t.replace("{args}", "");
+          t = replace_all_placeholders(t, "{overload}", "overload().");
+          t = replace_all_placeholders(t, "{args}", "");
         }
 
         //Debug - print FRIDA template
@@ -321,20 +384,14 @@ function generate_hook_template_Android (loaded_classes, loaded_methods, templat
       loaded_methods[clazz].forEach(function (dict) {
         var t = template //template2
 
-        // replace className
-        t = t.replace("{className}", clazz);
-        // replace classMethod x3
-        t = t.replace("{classMethod}", dict["name"]);
-        t = t.replace("{classMethod}", dict["name"]);
-        t = t.replace("{classMethod}", dict["name"]);
-        // replace methodSignature x2
-        t = t.replace("{methodSignature}", dict["ui_name"]);
-        t = t.replace("{methodSignature}", dict["ui_name"]);
+        t = replace_all_placeholders(t, "{className}", clazz);
+        t = replace_all_placeholders(t, "{classMethod}", dict["name"]);
+        t = replace_all_placeholders(t, "{methodSignature}", dict["ui_name"]);
 
         //check if the method has args 
         if (dict["args"] != "\"\"") {
           //check if the method has overloads
-          t = t.replace("{overload}", "overload(" + dict["args"] + ").");
+          t = replace_all_placeholders(t, "{overload}", "overload(" + dict["args"] + ").");
           // Check args length
           var args_len = (dict["args"].split(",")).length
 
@@ -345,18 +402,12 @@ function generate_hook_template_Android (loaded_classes, loaded_methods, templat
             else args = args + "v" + i + ",";
           }
 
-          //replace args x3
-          t = t.replace("{args}", args);
-          t = t.replace("{args}", args);
-          t = t.replace("{args}", args);
+          t = replace_all_placeholders(t, "{args}", args);
         } else {
           //Current methods has NO args 
           // no need to overload
-          t = t.replace("{overload}", "overload().");
-          //replace args x3
-          t = t.replace("{args}", "");
-          t = t.replace("{args}", "");
-          t = t.replace("{args}", "\"\"");
+          t = replace_all_placeholders(t, "{overload}", "overload().");
+          t = replace_all_placeholders(t, "{args}", "");
         }
 
         //Debug - print FRIDA template
@@ -380,14 +431,9 @@ function heap_search_template_Android(loaded_classes, loaded_methods, template)
       loaded_methods[clazz].forEach(function (dict) {
         var t = template //template2
 
-        // replace className
-        t = t.replace("{className}", clazz);
-        // replace classMethod x2
-        t = t.replace("{classMethod}", dict["name"]);
-        t = t.replace("{classMethod}", dict["name"]);
-        // replace methodSignature x2
-        t = t.replace("{methodSignature}", dict["ui_name"]);
-        t = t.replace("{methodSignature}", dict["ui_name"]);
+        t = replace_all_placeholders(t, "{className}", clazz);
+        t = replace_all_placeholders(t, "{classMethod}", dict["name"]);
+        t = replace_all_placeholders(t, "{methodSignature}", dict["ui_name"]);
 
         //check if the method has args 
         if (dict["args"] != "\"\"") {
@@ -402,14 +448,12 @@ function heap_search_template_Android(loaded_classes, loaded_methods, template)
             else args = args + "v" + i + ",";
           }
 
-          //replace args
-          t = t.replace("{args}", args);
+          t = replace_all_placeholders(t, "{args}", args);
 
         } else {
           //Current methods has NO args 
 
-          //replace args
-          t = t.replace("{args}", "");
+          t = replace_all_placeholders(t, "{args}", "");
 
         }
 
